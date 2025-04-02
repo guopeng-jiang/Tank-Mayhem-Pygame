@@ -1,6 +1,6 @@
 # Tank Mayhem (Pygame)
 
-A classic top-down 2D tank shooter game built with Python and the Pygame library. Control your tank, blast varied enemies, collect ammo power-ups, and survive the mayhem in randomly generated arenas!
+A classic top-down 2D tank shooter game 100% built using Gemini 2.5 Pro with Python and the Pygame library. Control your tank, blast varied enemies, collect ammo power-ups, and survive the mayhem in randomly generated arenas!
 
 Hello from the pygame community. https://www.pygame.org/contribute.html
 
