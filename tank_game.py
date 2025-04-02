@@ -4,8 +4,8 @@ import math
 import random
 
 # --- Constants ---
-SCREEN_WIDTH = 1000
-SCREEN_HEIGHT = 800
+SCREEN_WIDTH = 800
+SCREEN_HEIGHT = 600
 BLACK = (0, 0, 0)
 WHITE = (255, 255, 255)
 GREEN = (0, 180, 0)
@@ -90,16 +90,27 @@ PARTICLE_START_SIZE = 5
 PARTICLE_END_SIZE = 1
 EXPLOSION_COLORS = [(255, 0, 0), (255, 100, 0), (255, 200, 0), (200, 200, 200)] # Red, Orange, Yellow, Grey
 
-# Safe Zone Circle Constants
-GAME_DURATION = 2 * 60 * 1000 # 2 minute in milliseconds
-CIRCLE_START_RADIUS_FACTOR = 1.1 # Factor of screen half-diagonal
-CIRCLE_END_RADIUS = PLAYER_SIZE * 5 # Final radius (quite small)
-CIRCLE_COLOR = (150, 150, 255, 100) # Light blue, semi-transparent (RGBA)
-CIRCLE_WARNING_COLOR = (255, 100, 0, 120) # Orange when close to edge
-CIRCLE_THICKNESS = 3
-CIRCLE_DAMAGE_PER_SECOND = 0.5 # HP drain per second outside (adjust as needed)
-# Or use instant kill:
-# CIRCLE_INSTANT_KILL = True
+# # Safe Zone Circle Constants
+# GAME_DURATION = 2 * 60 * 1000 # 2 minute in milliseconds
+# CIRCLE_START_RADIUS_FACTOR = 1.1 # Factor of screen half-diagonal
+# CIRCLE_END_RADIUS = PLAYER_SIZE * 5 # Final radius (quite small)
+# CIRCLE_COLOR = (150, 150, 255, 100) # Light blue, semi-transparent (RGBA)
+# CIRCLE_WARNING_COLOR = (255, 100, 0, 120) # Orange when close to edge
+# CIRCLE_THICKNESS = 3
+# CIRCLE_DAMAGE_PER_SECOND = 0.5 # HP drain per second outside (adjust as needed)
+# # Or use instant kill:
+# # CIRCLE_INSTANT_KILL = True
+
+# Bombardment Constants
+BOMBARDMENT_COUNT = 9
+BOMBARDMENT_RADIUS = 75 # Radius of each danger zone
+BOMBARDMENT_DURATION = 10000 # 10 seconds in milliseconds
+BOMBARDMENT_COOLDOWN = 15000 # 15 seconds between end of one and start of next
+NEXT_BOMBARDMENT_DELAY = 12000 # Initial delay before first bombardment (12 seconds)
+BOMBARDMENT_COLOR = (255, 0, 0, 50) # Red, semi-transparent (RGBA)
+BOMBARDMENT_THICKNESS = 2
+# BOMBARDMENT_DAMAGE_PER_SECOND = 1.5 # Option 1: Damage over time
+BOMBARDMENT_INSTANT_KILL = True      # Option 2: Instant kill
 
 # --- Helper Functions ---
 def angle_diff(a1, a2):
@@ -440,6 +451,74 @@ class Wall(pygame.sprite.Sprite):
         self.rect = self.image.get_rect()
         self.rect.topleft = (x, y)
 
+# --- Bombardment Zone Class ---
+class BombardmentZone:
+    def __init__(self, x, y, spawn_time):
+        self.center = pygame.Vector2(x, y)
+        self.radius = BOMBARDMENT_RADIUS
+        self.spawn_time = spawn_time
+        self.color = BOMBARDMENT_COLOR
+        self.thickness = BOMBARDMENT_THICKNESS
+        print(f"Bombardment zone created at {self.center}") # Debug
+
+    def is_expired(self, current_time):
+        """Checks if the zone's duration has passed."""
+        return current_time - self.spawn_time > BOMBARDMENT_DURATION
+
+    def collides_point(self, point_vec):
+        """Checks if a point vector is inside the zone."""
+        return point_vec.distance_to(self.center) <= self.radius
+
+    def draw(self, surface):
+        """Draws the zone on the target surface."""
+        # Draw on a temporary surface for alpha blending
+        temp_surface = pygame.Surface(surface.get_size(), pygame.SRCALPHA)
+        pygame.draw.circle(temp_surface, self.color,
+                           (int(self.center.x), int(self.center.y)),
+                           self.radius, self.thickness)
+        surface.blit(temp_surface, (0, 0))
+
+# --- Helper function to start bombardment ---
+def start_bombardment(current_time, zone_list, walls_group, player_sprite):
+
+    print(f"Starting bombardment at {current_time}!") # Debug
+    zone_list.clear() # Clear any previous zones (should be empty anyway)
+    spawned_count = 0
+    total_attempts = 0 # Prevent infinite loops
+
+    # Define spawn area inset from borders
+    min_x = BORDER_THICKNESS + BOMBARDMENT_RADIUS
+    max_x = SCREEN_WIDTH - BORDER_THICKNESS - BOMBARDMENT_RADIUS
+    min_y = BORDER_THICKNESS + BOMBARDMENT_RADIUS
+    max_y = SCREEN_HEIGHT - BORDER_THICKNESS - BOMBARDMENT_RADIUS
+
+    while spawned_count < BOMBARDMENT_COUNT and total_attempts < 200:
+        total_attempts += 1
+        # Generate random center within allowed area
+        x = random.uniform(min_x, max_x)
+        y = random.uniform(min_y, max_y)
+        new_zone = BombardmentZone(x, y, current_time)
+
+        # --- Optional: Check for overlap with existing *new* zones ---
+        overlap = False
+        for existing_zone in zone_list:
+            if new_zone.center.distance_to(existing_zone.center) < BOMBARDMENT_RADIUS * 1.5: # Allow some overlap
+                overlap = True
+                break
+        if overlap:
+            continue # Try a different position
+
+        # --- Check overlap with player (don't spawn right on top) ---
+        if player_sprite and new_zone.collides_point(pygame.Vector2(player_sprite.rect.center)): 
+            continue # Try different position
+
+        zone_list.append(new_zone)
+        spawned_count += 1
+
+    if spawned_count < BOMBARDMENT_COUNT:
+        print(f"Warning: Only spawned {spawned_count}/{BOMBARDMENT_COUNT} bombardment zones.")
+
+
 # --- Particle Class for Explosions ---
 class Particle(pygame.sprite.Sprite):
     def __init__(self, x, y, groups):
@@ -580,6 +659,7 @@ def create_explosion(center_pos, all_sprites_group, particles_group):
         # Pass the groups directly to the Particle constructor
         Particle(center_pos[0], center_pos[1], (all_sprites_group, particles_group))
 
+
 # --- NEW: Game Setup Function ---
 def setup_game():
     print("Setting up new game...") # Debug message
@@ -600,19 +680,23 @@ def setup_game():
     # Timer for the next star spawn
     next_powerup_spawn_time = pygame.time.get_ticks() + 8000 # Spawn first one after 8 seconds
 
-    # --- NEW: Safe Zone & Timer Setup ---
-    game_start_time = pygame.time.get_ticks()
-    # Calculate a random center, avoiding edges
-    padding_x = SCREEN_WIDTH * 0.15
-    padding_y = SCREEN_HEIGHT * 0.15
-    circle_center_x = random.uniform(padding_x, SCREEN_WIDTH - padding_x)
-    circle_center_y = random.uniform(padding_y, SCREEN_HEIGHT - padding_y)
-    # Initial radius covers most screen
-    screen_diag = math.hypot(SCREEN_WIDTH, SCREEN_HEIGHT)
-    circle_start_radius = screen_diag / 2 * CIRCLE_START_RADIUS_FACTOR
-    circle_current_radius = circle_start_radius # Start at max
-    print(f"Circle center: ({circle_center_x:.0f}, {circle_center_y:.0f}), Start Radius: {circle_start_radius:.0f}") # Debug
-    # --- End Safe Zone Setup ---
+    # # --- NEW: Safe Zone & Timer Setup ---
+    # game_start_time = pygame.time.get_ticks()
+    # # Calculate a random center, avoiding edges
+    # padding_x = SCREEN_WIDTH * 0.15
+    # padding_y = SCREEN_HEIGHT * 0.15
+    # circle_center_x = random.uniform(padding_x, SCREEN_WIDTH - padding_x)
+    # circle_center_y = random.uniform(padding_y, SCREEN_HEIGHT - padding_y)
+    # # Initial radius covers most screen
+    # screen_diag = math.hypot(SCREEN_WIDTH, SCREEN_HEIGHT)
+    # circle_start_radius = screen_diag / 2 * CIRCLE_START_RADIUS_FACTOR
+    # circle_current_radius = circle_start_radius # Start at max
+    # print(f"Circle center: ({circle_center_x:.0f}, {circle_center_y:.0f}), Start Radius: {circle_start_radius:.0f}") # Debug
+    # # --- End Safe Zone Setup ---
+
+    # --- ADD NEW BOMBARDMENT VARS ---
+    next_bombardment_time = pygame.time.get_ticks() + NEXT_BOMBARDMENT_DELAY
+    active_bombardment_zones = [] # List to hold active zone objects
 
     # --- Create Boundary Walls ---
     wall_list = [
@@ -688,12 +772,18 @@ def setup_game():
         if spawn_attempts >= 200: print("Warning: Could not place an enemy after 200 attempts.")
 
     # Return all the necessary items for the game loop
-    # Return the new circle and timer variables
+    # # Return the new circle and timer variables
+    # return (all_sprites, players, enemies, player_bullets, enemy_bullets,
+            # walls, powerups, particles, player, score, game_over, win,
+            # next_powerup_spawn_time, # Keep existing ones
+            # game_start_time, circle_center_x, circle_center_y, # Add new ones
+            # circle_current_radius, circle_start_radius) # Add new ones
+            
+    # Return bombardment variables instead of old circle ones
     return (all_sprites, players, enemies, player_bullets, enemy_bullets,
             walls, powerups, particles, player, score, game_over, win,
-            next_powerup_spawn_time, # Keep existing ones
-            game_start_time, circle_center_x, circle_center_y, # Add new ones
-            circle_current_radius, circle_start_radius) # Add new ones
+            next_powerup_spawn_time, # Keep powerup timer
+            next_bombardment_time, active_bombardment_zones) # Add new ones
 
 
 # --- Pygame Initialization ---
@@ -709,28 +799,31 @@ while running:
     # --- Call setup to get fresh game state ---
     (all_sprites, players, enemies, player_bullets, enemy_bullets,
      walls, powerups, particles, player, score, game_over, win,
-     next_powerup_spawn_time,
-     # --- Unpack new variables ---
-     game_start_time, circle_center_x, circle_center_y,
-     circle_current_radius, circle_start_radius # Initial radius needed for lerp
+     next_powerup_spawn_time,     
+     # --- Unpack new bombardment variables ---
+     next_bombardment_time, active_bombardment_zones
      ) = setup_game()
+     # # --- Unpack new variables ---
+     # game_start_time, circle_center_x, circle_center_y,
+     # circle_current_radius, circle_start_radius # Initial radius needed for lerp
+     # ) = setup_game()
 
     # --- Gameplay Loop ---
     game_active = True
-    # Variable to track damage tick for circle
-    last_circle_damage_time = pygame.time.get_ticks()
+    # # Variable to track damage tick for circle
+    # last_circle_damage_time = pygame.time.get_ticks()
 
     while game_active:
         current_time = pygame.time.get_ticks()
 
-        # --- Calculate Time and Circle Radius ---
-        elapsed_time = current_time - game_start_time
-        time_remaining = max(0, GAME_DURATION - elapsed_time)
-        time_ratio = min(1.0, elapsed_time / GAME_DURATION) # Clamp between 0 and 1
+        # # --- Calculate Time and Circle Radius ---
+        # elapsed_time = current_time - game_start_time
+        # time_remaining = max(0, GAME_DURATION - elapsed_time)
+        # time_ratio = min(1.0, elapsed_time / GAME_DURATION) # Clamp between 0 and 1
 
-        # Linear interpolation for radius
-        circle_current_radius = circle_start_radius + (CIRCLE_END_RADIUS - circle_start_radius) * time_ratio
-        circle_current_radius = max(CIRCLE_END_RADIUS, circle_current_radius) # Ensure it doesn't go below min
+        # # Linear interpolation for radius
+        # circle_current_radius = circle_start_radius + (CIRCLE_END_RADIUS - circle_start_radius) * time_ratio
+        # circle_current_radius = max(CIRCLE_END_RADIUS, circle_current_radius) # Ensure it doesn't go below min
 
         # --- Event Handling ---
         for event in pygame.event.get():
@@ -768,31 +861,44 @@ while running:
                 next_powerup_spawn_time = current_time + 5000
 
         # --- Update ---
-        # --- Safe Zone Damage Logic ---
-        circle_center = pygame.Vector2(circle_center_x, circle_center_y)
+        # # --- Safe Zone Damage Logic ---
+        # circle_center = pygame.Vector2(circle_center_x, circle_center_y)
+        
+        # --- NEW: Bombardment Timing ---
+        # Check if it's time to START a bombardment
+        if current_time >= next_bombardment_time and not active_bombardment_zones:
+            start_bombardment(current_time, active_bombardment_zones, walls, players.sprite)
+            # Next check will be for ending this one
 
-        # Check Player
-        if player.alive():
-            player_pos = pygame.Vector2(player.rect.center)
-            distance = player_pos.distance_to(circle_center)
-            if distance > circle_current_radius:
-                # --- Simplified Damage: Apply small fixed damage per frame outside ---
-                player.take_damage(0.05) # Example: 0.05 HP damage per frame outside
-                # ---------------------------
-                if not player.alive():
-                    create_explosion(player.rect.center, all_sprites, particles)
-                    game_over = True
-                    print("GAME OVER - Player Destroyed by Circle")
+        # Check if it's time to END the current bombardment
+        elif active_bombardment_zones and active_bombardment_zones[0].is_expired(current_time):
+            print(f"Bombardment ended at {current_time}.") # Debug
+            active_bombardment_zones.clear()
+            # Schedule the next one after the cooldown
+            next_bombardment_time = current_time + BOMBARDMENT_COOLDOWN
 
-        # Check Enemies
-        for enemy in enemies:
-             enemy_pos = pygame.Vector2(enemy.rect.center)
-             distance = enemy_pos.distance_to(circle_center)
-             if distance > circle_current_radius:
-                 # Kill enemies instantly when outside
-                 print(f"Enemy {enemy.type} outside circle. Destroyed.") # Debug
-                 create_explosion(enemy.rect.center, all_sprites, particles)
-                 enemy.kill() # No score for circle kills
+        # # Check Player
+        # if player.alive():
+            # player_pos = pygame.Vector2(player.rect.center)
+            # distance = player_pos.distance_to(circle_center)
+            # if distance > circle_current_radius:
+                # # --- Simplified Damage: Apply small fixed damage per frame outside ---
+                # player.take_damage(0.05) # Example: 0.05 HP damage per frame outside
+                # # ---------------------------
+                # if not player.alive():
+                    # create_explosion(player.rect.center, all_sprites, particles)
+                    # game_over = True
+                    # print("GAME OVER - Player Destroyed by Circle")
+
+        # # Check Enemies
+        # for enemy in enemies:
+             # enemy_pos = pygame.Vector2(enemy.rect.center)
+             # distance = enemy_pos.distance_to(circle_center)
+             # if distance > circle_current_radius:
+                 # # Kill enemies instantly when outside
+                 # print(f"Enemy {enemy.type} outside circle. Destroyed.") # Debug
+                 # create_explosion(enemy.rect.center, all_sprites, particles)
+                 # enemy.kill() # No score for circle kills
                  
         # Update the player tank
         if player.alive():
@@ -855,19 +961,71 @@ while running:
                     next_powerup_spawn_time = current_time + POWERUP_RESPAWN_TIME
                     # Add score? Optional
 
+        # --- NEW: Bombardment Zone Damage Logic ---
+        if active_bombardment_zones:
+            player_was_hit = False # Prevent multiple hits per frame
+            # Check Player
+            if player.alive():
+                player_pos = pygame.Vector2(player.rect.center)
+                for zone in active_bombardment_zones:
+                    if zone.collides_point(player_pos):
+                        if BOMBARDMENT_INSTANT_KILL:
+                            print("Player inside bombardment zone! Instant kill.")
+                            create_explosion(player.rect.center, all_sprites, particles)
+                            player.kill()
+                            game_over = True
+                            player_was_hit = True
+                            break # Stop checking zones for player
+                        # --- Optional: Damage Over Time ---
+                        # else:
+                        #     damage_this_frame = BOMBARDMENT_DAMAGE_PER_SECOND * delta_time
+                        #     player.take_damage(damage_this_frame)
+                        #     if not player.alive():
+                        #         create_explosion(player.rect.center, all_sprites, particles)
+                        #         game_over = True
+                        #         print("GAME OVER - Player Destroyed by Bombardment")
+                        #         player_was_hit = True
+                        #         break
+                        # --- End Optional DOT ---
+
+            # Check Enemies (Iterate over a copy in case of removal)
+            enemies_hit_this_frame = [] # Track enemies hit to avoid multi-hit
+            for enemy in enemies.sprites()[:]: # Iterate copy
+                 if enemy in enemies_hit_this_frame: continue # Already processed
+
+                 enemy_pos = pygame.Vector2(enemy.rect.center)
+                 for zone in active_bombardment_zones:
+                     if zone.collides_point(enemy_pos):
+                         if BOMBARDMENT_INSTANT_KILL:
+                             print(f"Enemy {enemy.type} in bombardment. Destroyed.")
+                             create_explosion(enemy.rect.center, all_sprites, particles)
+                             enemy.kill() # No score for bombardment kills
+                             enemies_hit_this_frame.append(enemy) # Mark as processed
+                             break # Stop checking zones for this enemy
+                         # --- Optional: Damage Over Time ---
+                         # else:
+                         #     # Implement DOT for enemies if desired
+                         #     enemy.take_damage(BOMBARDMENT_DAMAGE_PER_SECOND * delta_time)
+                         #     if enemy.health <= 0:
+                         #          create_explosion(enemy.rect.center, all_sprites, particles)
+                         #          enemy.kill()
+                         #          enemies_hit_this_frame.append(enemy)
+                         #          break
+                         # --- End Optional DOT ---
+
         # --- Win/Loss Conditions Check ---
         if not enemies and not win and not game_over: # Check win only if not already ended
             win = True
             print("YOU WIN! - All Enemies Destroyed")
 
-        # Check if time ran out (and player hasn't won or already lost)
-        if time_remaining <= 0 and not win and not game_over:
-            print("GAME OVER - Time Ran Out!")
-            game_over = True
-            # Optionally kill player if timer runs out?
-            if player.alive():
-                 create_explosion(player.rect.center, all_sprites, particles)
-                 player.kill()
+        # # Check if time ran out (and player hasn't won or already lost)
+        # if time_remaining <= 0 and not win and not game_over:
+            # print("GAME OVER - Time Ran Out!")
+            # game_over = True
+            # # Optionally kill player if timer runs out?
+            # if player.alive():
+                 # create_explosion(player.rect.center, all_sprites, particles)
+                 # player.kill()
 
 
         # --- Check if game should end this frame ---
@@ -878,21 +1036,27 @@ while running:
         screen.fill(GRASS_GREEN)
         all_sprites.draw(screen)
 
-        # --- NEW: Draw Safe Zone Circle ---
-        # Use a surface for transparency
-        circle_surface = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
-        current_circle_color = CIRCLE_COLOR
-        # Optional: Warning color if player is close to edge
-        if player.alive():
-            player_dist_from_edge = circle_current_radius - player_pos.distance_to(circle_center)
-            if 0 < player_dist_from_edge < PLAYER_SIZE * 3: # If within 3x player size of edge
-                 current_circle_color = CIRCLE_WARNING_COLOR
+        # --- NEW: Draw Bombardment Zones ---
+        if active_bombardment_zones:
+            for zone in active_bombardment_zones:
+                zone.draw(screen)
+        # --- End Bombardment Drawing ---
 
-        pygame.draw.circle(circle_surface, current_circle_color,
-                           (int(circle_center_x), int(circle_center_y)),
-                           int(circle_current_radius), CIRCLE_THICKNESS)
-        screen.blit(circle_surface, (0,0))
-        # --- End Circle Drawing ---
+        # # --- NEW: Draw Safe Zone Circle ---
+        # # Use a surface for transparency
+        # circle_surface = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        # current_circle_color = CIRCLE_COLOR
+        # # Optional: Warning color if player is close to edge
+        # if player.alive():
+            # player_dist_from_edge = circle_current_radius - player_pos.distance_to(circle_center)
+            # if 0 < player_dist_from_edge < PLAYER_SIZE * 3: # If within 3x player size of edge
+                 # current_circle_color = CIRCLE_WARNING_COLOR
+
+        # pygame.draw.circle(circle_surface, current_circle_color,
+                           # (int(circle_center_x), int(circle_center_y)),
+                           # int(circle_current_radius), CIRCLE_THICKNESS)
+        # screen.blit(circle_surface, (0,0))
+        # # --- End Circle Drawing ---
 
         # --- Draw UI ---
         draw_text(screen, f"Score: {score}", 24, 15, 15)
@@ -900,13 +1064,44 @@ while running:
         draw_text(screen, f"HP: {max(0, player.health):.0f}/{PLAYER_MAX_HEALTH}", 24, 15, 40, hp_color) # Format HP as int
         draw_text(screen, f"Ammo: {player.ammo}/{PLAYER_MAX_AMMO}", 24, 15, 65)
 
-        # Draw Countdown Timer
-        minutes = int(time_remaining / 1000 // 60)
-        seconds = int(time_remaining / 1000 % 60)
-        time_text = f"Time: {minutes:02d}:{seconds:02d}"
-        time_color = YELLOW if time_remaining < 30000 else WHITE # Yellow warning under 30s
-        draw_text(screen, time_text, 24, SCREEN_WIDTH - 150, 15, time_color) # Top-right
+        # # Draw Countdown Timer
+        # minutes = int(time_remaining / 1000 // 60)
+        # seconds = int(time_remaining / 1000 % 60)
+        # time_text = f"Time: {minutes:02d}:{seconds:02d}"
+        # time_color = YELLOW if time_remaining < 30000 else WHITE # Yellow warning under 30s
+        # draw_text(screen, time_text, 24, SCREEN_WIDTH - 150, 15, time_color) # Top-right
 
+        # --- NEW: Calculate and Draw Bombardment Timer ---
+        bombardment_timer_text = ""
+        bombardment_time_remaining_ms = 0
+        label = ""
+        timer_color = WHITE
+
+        if active_bombardment_zones:
+            # Bombardment is ACTIVE - show time until it ENDS
+            # Assuming all zones start at the same time, use the first one
+            end_time = active_bombardment_zones[0].spawn_time + BOMBARDMENT_DURATION
+            bombardment_time_remaining_ms = max(0, end_time - current_time)
+            label = "Bombardment End:"
+            if bombardment_time_remaining_ms < 3000: # Warning under 3s left
+                timer_color = YELLOW
+        else:
+            # Bombardment is INACTIVE (cooldown or before first) - show time until it STARTS
+            bombardment_time_remaining_ms = max(0, next_bombardment_time - current_time)
+            label = "Next Bombardment:"
+            if bombardment_time_remaining_ms < 5000 and next_bombardment_time > 0 : # Warning under 5s before start (ignore initial state)
+                 timer_color = YELLOW
+
+        # Format the time MM:SS
+        b_minutes = int(bombardment_time_remaining_ms / 1000 // 60) # Should always be 0 for short times, but good practice
+        b_seconds = int(bombardment_time_remaining_ms / 1000 % 60)
+        bombardment_timer_text = f"{label} {b_minutes:01d}:{b_seconds:02d}" # Use 1 digit for minutes if always 0
+
+        # Position in Top-Right
+        timer_x_pos = SCREEN_WIDTH //3 # Adjust X position as needed
+        timer_y_pos = 15             # Adjust Y position as needed
+        draw_text(screen, bombardment_timer_text, 24, timer_x_pos, timer_y_pos, timer_color)
+        # --- End Bombardment Timer ---
 
         pygame.display.flip()
         clock.tick(60)
