@@ -63,5 +63,3 @@ Hello from the pygame community. https://www.pygame.org/contribute.html
 *   **Sound Effects:** Add sounds for shooting, explosions, tank movement, power-up collection, etc.
 *   **Improved AI:** Make enemies navigate more intelligently or use flanking tactics.
 *   **More Power-ups:** Health packs, temporary shields, faster firing rate, etc.
-*   **Levels/Waves:** Introduce increasing difficulty or different level objectives.
-*   **Collision Response:** Tank collision with walls is basic and tanks can sometimes get stuck briefly.
