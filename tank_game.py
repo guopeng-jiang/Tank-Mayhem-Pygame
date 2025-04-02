@@ -49,7 +49,7 @@ ENEMY_TYPES = {
         'score': 50,
     }
 }
-ENEMY_COUNT = 10 # Increased count slightly
+# ENEMY_COUNT = 10 # Increased count slightly
 ENEMY_MAX_AMMO = 30
 ENEMY_AIM_TOLERANCE = 10 # Degrees within player direction to fire
 
@@ -100,6 +100,11 @@ EXPLOSION_COLORS = [(255, 0, 0), (255, 100, 0), (255, 200, 0), (200, 200, 200)] 
 # CIRCLE_DAMAGE_PER_SECOND = 0.5 # HP drain per second outside (adjust as needed)
 # # Or use instant kill:
 # # CIRCLE_INSTANT_KILL = True
+
+# Wave System Constants
+MAX_WAVES = 10
+WAVE_START_DELAY = 5000       # 5 seconds delay before first wave and between waves
+ENEMY_SPAWN_INTERVAL = 1200   # Time between spawning each enemy within a wave (1.2 seconds)
 
 # Bombardment Constants
 BOMBARDMENT_COUNT = 9
@@ -659,6 +664,15 @@ def create_explosion(center_pos, all_sprites_group, particles_group):
         # Pass the groups directly to the Particle constructor
         Particle(center_pos[0], center_pos[1], (all_sprites_group, particles_group))
 
+# --- Fibonacci Helper ---
+# Simple iterative Fibonacci calculation
+def fibonacci(n):
+    if n <= 0: return 0
+    if n == 1: return 1
+    a, b = 0, 1
+    for _ in range(n - 1):
+        a, b = b, a + b
+    return b
 
 # --- NEW: Game Setup Function ---
 def setup_game():
@@ -697,6 +711,15 @@ def setup_game():
     # --- ADD NEW BOMBARDMENT VARS ---
     next_bombardment_time = pygame.time.get_ticks() + NEXT_BOMBARDMENT_DELAY
     active_bombardment_zones = [] # List to hold active zone objects
+
+    # --- NEW: Wave System Variables ---
+    wave_number = 0                       # Start at wave 0, first wave is 1
+    enemies_this_wave = 0                 # How many enemies total for the current wave
+    enemies_spawned_this_wave = 0         # How many spawned *so far* in current wave
+    next_wave_time = pygame.time.get_ticks() + WAVE_START_DELAY # Time for the *first* wave
+    next_enemy_spawn_time = 0             # Timer for individual spawns within a wave
+    waiting_for_next_wave = True          # Flag to indicate if we are between waves
+    # --- End Wave Variables ---
 
     # --- Create Boundary Walls ---
     wall_list = [
@@ -754,22 +777,22 @@ def setup_game():
     players.add(player)
     all_sprites.add(player) # Add player AFTER barriers
 
-    # --- Create Enemies ---
-    for _ in range(ENEMY_COUNT):
-        spawn_attempts = 0
-        while spawn_attempts < 200:
-             spawn_attempts += 1
-             temp_type = random.choice(list(ENEMY_TYPES.keys()))
-             temp_size = ENEMY_TYPES[temp_type]['size']
-             x = random.randint(BORDER_THICKNESS + temp_size, SCREEN_WIDTH - BORDER_THICKNESS - temp_size)
-             y = random.randint(BORDER_THICKNESS + temp_size, SCREEN_HEIGHT - BORDER_THICKNESS - temp_size)
-             enemy = Enemy(x, y, walls)
-             if not pygame.sprite.spritecollide(enemy, walls, False) and \
-                not enemy.rect.colliderect(player.rect.inflate(player.size * 1.5, player.size * 1.5)):
-                     all_sprites.add(enemy)
-                     enemies.add(enemy)
-                     break
-        if spawn_attempts >= 200: print("Warning: Could not place an enemy after 200 attempts.")
+    # # --- Create Enemies ---
+    # for _ in range(ENEMY_COUNT):
+        # spawn_attempts = 0
+        # while spawn_attempts < 200:
+             # spawn_attempts += 1
+             # temp_type = random.choice(list(ENEMY_TYPES.keys()))
+             # temp_size = ENEMY_TYPES[temp_type]['size']
+             # x = random.randint(BORDER_THICKNESS + temp_size, SCREEN_WIDTH - BORDER_THICKNESS - temp_size)
+             # y = random.randint(BORDER_THICKNESS + temp_size, SCREEN_HEIGHT - BORDER_THICKNESS - temp_size)
+             # enemy = Enemy(x, y, walls)
+             # if not pygame.sprite.spritecollide(enemy, walls, False) and \
+                # not enemy.rect.colliderect(player.rect.inflate(player.size * 1.5, player.size * 1.5)):
+                     # all_sprites.add(enemy)
+                     # enemies.add(enemy)
+                     # break
+        # if spawn_attempts >= 200: print("Warning: Could not place an enemy after 200 attempts.")
 
     # Return all the necessary items for the game loop
     # # Return the new circle and timer variables
@@ -780,11 +803,114 @@ def setup_game():
             # circle_current_radius, circle_start_radius) # Add new ones
             
     # Return bombardment variables instead of old circle ones
+    # Return the new wave variables
     return (all_sprites, players, enemies, player_bullets, enemy_bullets,
             walls, powerups, particles, player, score, game_over, win,
-            next_powerup_spawn_time, # Keep powerup timer
-            next_bombardment_time, active_bombardment_zones) # Add new ones
+            next_powerup_spawn_time,
+            next_bombardment_time, active_bombardment_zones,
+            # --- Add new wave vars to return ---
+            wave_number, enemies_this_wave, enemies_spawned_this_wave,
+            next_wave_time, next_enemy_spawn_time, waiting_for_next_wave)
 
+# --- Helper function to spawn enemy at edge ---
+def spawn_enemy_at_edge(all_sprites_group, enemies_group, walls_group, player_sprite):
+    spawn_attempts = 0
+    max_attempts = 100
+    min_dist_from_player = PLAYER_SIZE * 4
+
+    while spawn_attempts < max_attempts:
+        spawn_attempts += 1
+        edge = random.choice(['top', 'bottom', 'left', 'right'])
+        x, y = 0, 0
+
+        max_enemy_size = max(d['size'] for d in ENEMY_TYPES.values())
+        # --- CONVERT BUFFER TO INT ---
+        buffer = int(max_enemy_size * 0.7) # Convert the result of multiplication to int
+        # ---
+
+        # Ensure buffer doesn't make range invalid if screen is small
+        # (BORDER_THICKNESS + buffer) must be less than (SCREEN_WIDTH/HEIGHT - BORDER_THICKNESS - buffer)
+        if (BORDER_THICKNESS + buffer) >= (SCREEN_WIDTH - BORDER_THICKNESS - buffer):
+            print("Warning: Buffer too large for screen width, adjusting.")
+            buffer = int((SCREEN_WIDTH / 2) - BORDER_THICKNESS - 1)
+        if (BORDER_THICKNESS + buffer) >= (SCREEN_HEIGHT - BORDER_THICKNESS - buffer):
+             print("Warning: Buffer too large for screen height, adjusting.")
+             buffer = int((SCREEN_HEIGHT / 2) - BORDER_THICKNESS - 1)
+        # Ensure buffer is not negative after adjustment
+        buffer = max(0, buffer)
+
+
+        # Determine coordinates based on edge (Now uses integer buffer)
+        if edge == 'top':
+            x = random.randint(BORDER_THICKNESS + buffer, SCREEN_WIDTH - BORDER_THICKNESS - buffer)
+            y = BORDER_THICKNESS + buffer
+        elif edge == 'bottom':
+            x = random.randint(BORDER_THICKNESS + buffer, SCREEN_WIDTH - BORDER_THICKNESS - buffer)
+            y = SCREEN_HEIGHT - BORDER_THICKNESS - buffer
+        elif edge == 'left':
+            x = BORDER_THICKNESS + buffer
+            y = random.randint(BORDER_THICKNESS + buffer, SCREEN_HEIGHT - BORDER_THICKNESS - buffer)
+        elif edge == 'right':
+            x = SCREEN_WIDTH - BORDER_THICKNESS - buffer
+            y = random.randint(BORDER_THICKNESS + buffer, SCREEN_HEIGHT - BORDER_THICKNESS - buffer)
+
+        # Create temporary enemy first
+        temp_enemy = Enemy(x, y, walls_group)
+        # Position its rect correctly *before* checks
+        temp_enemy.rect.center = (x, y)
+
+        # --- Check 1: Collision with walls (use a slightly smaller rect for the check) ---
+        # Check if the *center* is too close to a wall, rather than the edge of the rect
+        # This is more lenient for initial placement near corners
+        wall_collision_check_rect = temp_enemy.rect.inflate(-temp_enemy.size * 0.2, -temp_enemy.size * 0.2) # Shrink check rect
+        collided_walls = pygame.sprite.spritecollide(temp_enemy, walls_group, False, pygame.sprite.collide_rect_ratio(0.8)) # Use shrunk rect implicitly? Or check manually
+        # Manual check might be better:
+        # collided_walls = False
+        # for wall in walls_group:
+        #      if wall_collision_check_rect.colliderect(wall.rect):
+        #           collided_walls = True
+        #           break
+        if collided_walls:
+             # print(f"Attempt {spawn_attempts}: Edge spawn ({x},{y}) too close to wall.") # Debug
+             continue
+
+        # --- Check 2: Distance from player ---
+        if player_sprite and pygame.Vector2(x, y).distance_to(player_sprite.rect.center) < min_dist_from_player + temp_enemy.size: # Add enemy size to check
+             # print(f"Attempt {spawn_attempts}: Edge spawn ({x},{y}) too close to player.") # Debug
+             continue
+
+        # --- Check 3: Overlap with other *existing* enemies ---
+        # Use a slightly smaller check again to allow closer spawns initially
+        enemy_collision_check_rect = temp_enemy.rect.inflate(-4, -4)
+        collided_enemies = False
+        for other_enemy in enemies_group:
+            if enemy_collision_check_rect.colliderect(other_enemy.rect):
+                collided_enemies = True
+                break
+        if collided_enemies:
+             # print(f"Attempt {spawn_attempts}: Edge spawn ({x},{y}) overlaps existing enemy.") # Debug
+             continue
+
+
+        # If all checks pass, add the enemy
+        all_sprites_group.add(temp_enemy)
+        enemies_group.add(temp_enemy)
+
+        # --- Optional Nudge ---
+        # Immediately after adding, check collision again and nudge inwards if needed
+        # if pygame.sprite.spritecollide(temp_enemy, walls_group, False):
+        #      print(f"Nudging enemy spawned at ({x},{y})")
+        #      if edge == 'top': temp_enemy.rect.y += 3
+        #      elif edge == 'bottom': temp_enemy.rect.y -= 3
+        #      elif edge == 'left': temp_enemy.rect.x += 3
+        #      elif edge == 'right': temp_enemy.rect.x -= 3
+        # --- End Optional Nudge ---
+
+        return True # Success
+
+    # If loop finishes without success
+    print(f"Warning: Failed to spawn enemy at edge after {max_attempts} attempts.")
+    return False # Failure
 
 # --- Pygame Initialization ---
 pygame.init()
@@ -799,14 +925,12 @@ while running:
     # --- Call setup to get fresh game state ---
     (all_sprites, players, enemies, player_bullets, enemy_bullets,
      walls, powerups, particles, player, score, game_over, win,
-     next_powerup_spawn_time,     
-     # --- Unpack new bombardment variables ---
-     next_bombardment_time, active_bombardment_zones
+     next_powerup_spawn_time,
+     next_bombardment_time, active_bombardment_zones,
+     # --- Unpack wave variables ---
+     wave_number, enemies_this_wave, enemies_spawned_this_wave,
+     next_wave_time, next_enemy_spawn_time, waiting_for_next_wave
      ) = setup_game()
-     # # --- Unpack new variables ---
-     # game_start_time, circle_center_x, circle_center_y,
-     # circle_current_radius, circle_start_radius # Initial radius needed for lerp
-     # ) = setup_game()
 
     # --- Gameplay Loop ---
     game_active = True
@@ -877,6 +1001,63 @@ while running:
             # Schedule the next one after the cooldown
             next_bombardment_time = current_time + BOMBARDMENT_COOLDOWN
 
+        # --- Wave Management Logic ---
+        # 1. Check if wave needs to START
+        if waiting_for_next_wave and current_time >= next_wave_time:
+            wave_number += 1
+            if wave_number > MAX_WAVES:
+                if not win and not game_over:
+                     win = True
+                     print(f"DEBUG: Triggering WIN condition (wave_number={wave_number} > MAX_WAVES={MAX_WAVES})")
+                     game_active = False
+            else:
+                # Calculate Fibonacci number
+                fib_num = fibonacci(wave_number)
+                if fib_num <= 0: fib_num = 1 # Ensure at least 1 base
+
+                # --- ENFORCE MINIMUM ---
+                enemies_this_wave = max(10, fib_num) # Set enemies to at least 10
+                # ---
+
+                enemies_spawned_this_wave = 0
+                waiting_for_next_wave = False
+                next_enemy_spawn_time = current_time # Attempt first spawn immediately
+                print(f"--- Starting Wave {wave_number} ({enemies_this_wave} enemies | Fib={fib_num}) ---") # Log both numbers
+
+        # 2. Check if enemies need to be SPAWNED (during active wave)
+        # Ensure wave is active AND not all intended enemies have been successfully spawned yet
+        if not waiting_for_next_wave and enemies_spawned_this_wave < enemies_this_wave:
+            # Only try to spawn if the timer is ready
+            if current_time >= next_enemy_spawn_time:
+                # print(f"DEBUG: Attempting spawn for wave {wave_number}. {enemies_spawned_this_wave}/{enemies_this_wave} spawned.") # Debug
+                spawn_success = spawn_enemy_at_edge(all_sprites, enemies, walls, players.sprite)
+
+                if spawn_success:
+                    enemies_spawned_this_wave += 1
+                    # print(f"DEBUG: Spawn SUCCESS. Count now {enemies_spawned_this_wave}") # Debug
+                    # Schedule next spawn *only if successful* and more are needed
+                    if enemies_spawned_this_wave < enemies_this_wave:
+                        next_enemy_spawn_time = current_time + ENEMY_SPAWN_INTERVAL
+                    else: # All enemies for this wave have been successfully spawned
+                          print(f"DEBUG: All {enemies_this_wave} enemies for wave {wave_number} successfully spawned.")
+                else:
+                    # If spawn failed, schedule a RETRY soon, don't increment spawn count
+                    # print(f"DEBUG: Spawn FAILED. Retrying soon.") # Debug
+                    next_enemy_spawn_time = current_time + 300 # Try again faster
+
+        # 3. Check if wave is CLEARED (to schedule the next one)
+        # Condition: Wave is NOT waiting, AND all intended spawns have occurred, AND enemy group is empty
+        all_spawns_done = enemies_spawned_this_wave >= enemies_this_wave
+        # print(f"DEBUG: Check Clear: Wait={waiting_for_next_wave}, SpawnsDone={all_spawns_done}, EnemiesLeft={len(enemies)}") # Debug
+
+        if not waiting_for_next_wave and all_spawns_done and not enemies:
+             print(f"--- Wave {wave_number} Cleared! ---")
+             waiting_for_next_wave = True
+             # Ensure we don't schedule wave > MAX_WAVES
+             if wave_number < MAX_WAVES:
+                  next_wave_time = current_time + WAVE_START_DELAY
+             # else: Win condition already checked when wave_number increments
+
         # # Check Player
         # if player.alive():
             # player_pos = pygame.Vector2(player.rect.center)
@@ -900,13 +1081,13 @@ while running:
                  # create_explosion(enemy.rect.center, all_sprites, particles)
                  # enemy.kill() # No score for circle kills
                  
-        # Update the player tank
+        # Ensure player update receives enemies group
         if player.alive():
-            players.update(walls, enemies)
-
-        # Update each enemy tank
+             player.update(walls, enemies)
+        # Ensure enemy update receives correct groups
+        player_sprite_rect = player.rect if player.alive() else None
         for enemy in enemies:
-            enemy.update(all_sprites, enemy_bullets, player.rect, players, enemies)
+              enemy.update(all_sprites, enemy_bullets, player_sprite_rect, players, enemies)
 
 
         # Update bullets and particles
@@ -1029,7 +1210,7 @@ while running:
 
 
         # --- Check if game should end this frame ---
-        if game_over or win:
+        if game_over:
             game_active = False # Exit the gameplay loop
 
         # --- Drawing ---
@@ -1103,6 +1284,37 @@ while running:
         draw_text(screen, bombardment_timer_text, 24, timer_x_pos, timer_y_pos, timer_color)
         # --- End Bombardment Timer ---
 
+        # --- Draw Wave Status / Timer --- (Revised Logic)
+        wave_timer_text = ""
+        wave_timer_color = WHITE
+        wave_timer_y_pos = 40 # Position below bombardment timer
+
+        # Check ACTIVE wave FIRST
+        if not waiting_for_next_wave and wave_number <= MAX_WAVES: # Check we haven't already won
+             enemies_left = len(enemies)
+             wave_timer_text = f"Wave: {wave_number}/{MAX_WAVES} | Left: {enemies_left}"
+             wave_timer_color = ORANGE
+        # Check if WAITING for next wave (and not won yet)
+        elif waiting_for_next_wave and wave_number < MAX_WAVES and not game_over: # Check game_over too
+             wave_time_remaining_ms = max(0, next_wave_time - current_time)
+             w_seconds = int(wave_time_remaining_ms / 1000 % 60)
+             wave_timer_text = f"Next Wave ({wave_number + 1}) in: {w_seconds}s"
+             if wave_time_remaining_ms < 3000: wave_timer_color = YELLOW
+        # Check if game is WON (highest priority after active)
+        elif win:
+             wave_timer_text = f"Survived {MAX_WAVES} Waves!"
+             wave_timer_color = GREEN
+        # Add a case for GAME OVER state during gameplay (optional)
+        elif game_over:
+             wave_timer_text = "Player Destroyed!"
+             wave_timer_color = RED
+
+        # Use same X position as bombardment timer, adjust Y
+        wave_timer_x_pos = SCREEN_WIDTH //2 # Reuse X position
+        if wave_timer_text: # Only draw if text is set
+             draw_text(screen, wave_timer_text, 24, wave_timer_x_pos, wave_timer_y_pos, wave_timer_color)
+        # --- End Wave Timer ---
+
         pygame.display.flip()
         clock.tick(60)
 
@@ -1117,12 +1329,14 @@ while running:
 
         final_message_text = ""
         final_message_color = WHITE
-        if win:
-            final_message_text = "YOU WIN!"
-            final_message_color = GREEN
-        elif game_over:
+
+        # --- PRIORITIZE GAME OVER MESSAGE ---
+        if game_over: # Check Game Over FIRST
             final_message_text = "GAME OVER"
             final_message_color = RED
+        elif win: # Check Win only if not Game Over
+            final_message_text = f"YOU WIN! Survived {MAX_WAVES} Waves!"
+            final_message_color = GREEN
 
         if final_message_text:
             final_message_surface = end_font_large.render(final_message_text, True, final_message_color)
